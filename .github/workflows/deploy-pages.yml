@@ -28,27 +28,6 @@ jobs:
         run: |
           mkdir app
           tar -xzf frontend-source.tgz -C app
-          echo "APP_DIR=app" >> "$GITHUB_ENV"
-
-      - name: Apply source overlays
-        run: |
-          if [ -d src ]; then
-            cp -R src/. app/src/
-          fi
-          if [ -f app/src/pages/AdminPage.tsx.part.001 ]; then
-            cat app/src/pages/AdminPage.tsx.part.* > app/src/pages/AdminPage.tsx
-            rm app/src/pages/AdminPage.tsx.part.*
-          fi
-          if [ -d public ]; then
-            mkdir -p app/public
-            cp -R public/. app/public/
-          fi
-          if [ -f app/public/invoice_template_20260605.xlsx.b64.part.001 ]; then
-            cat app/public/invoice_template_20260605.xlsx.b64.part.* | base64 -d > app/public/invoice_template_20260605.xlsx
-            rm app/public/invoice_template_20260605.xlsx.b64.part.*
-          elif [ -f app/public/invoice_template_20260605.xlsx.b64.001 ]; then
-            cat app/public/invoice_template_20260605.xlsx.b64.* | base64 -d > app/public/invoice_template_20260605.xlsx
-          fi
 
       - name: Setup Node
         uses: actions/setup-node@v4
