@@ -35,6 +35,10 @@ jobs:
           if [ -d src ]; then
             cp -R src/. app/src/
           fi
+          if [ -f app/src/pages/AdminPage.tsx.part.001 ]; then
+            cat app/src/pages/AdminPage.tsx.part.* > app/src/pages/AdminPage.tsx
+            rm app/src/pages/AdminPage.tsx.part.*
+          fi
           if [ -d public ]; then
             mkdir -p app/public
             cp -R public/. app/public/
