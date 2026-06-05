@@ -1,0 +1,334 @@
+      </div>
+        ) : null}
+
+        <label htmlFor="purge-confirm">Type DELETE to confirm</label>
+        <input
+          id="purge-confirm"
+          name="purge-confirm-text"
+          value={purgeConfirm}
+          onChange={(event) => setPurgeConfirm(event.target.value)}
+          autoComplete="off"
+          spellCheck={false}
+          required
+        />
+
+        <label htmlFor="purge-password">Re-enter your password</label>
+        <input
+          id="purge-password"
+          name="purge-reauth-password"
+          type="password"
+          value={purgePassword}
+          onChange={(event) => setPurgePassword(event.target.value)}
+          autoComplete="new-password"
+          required
+        />
+
+        <button className="danger" type="submit" disabled={purgeBusy}>
+          <ShieldAlert size={18} aria-hidden="true" />
+          Delete matching transactions
+        </button>
+      </form>
+
+      {selected ? (
+        <form className="panel form-stack" onSubmit={(event) => void submitCorrection(event)}>
+          <h2>Correct transaction</h2>
+          <label htmlFor="correction-reason">Reason</label>
+          <textarea id="correction-reason" value={reason} onChange={(event) => setReason(event.target.value)} required />
+          <label htmlFor="correction-date">Date</label>
+          <input id="correction-date" type="date" value={replacement.transactionDate} onChange={(event) => setReplacement((current) => ({ ...current, transactionDate: event.target.value }))} required />
+          <label htmlFor="correction-project">Project</label>
+          <select id="correction-project" value={replacement.projectId} onChange={(event) => setReplacement((current) => ({ ...current, projectId: event.target.value }))}>
+            {projects.map((project) => <option key={project.id} value={project.id}>{project.projectCode} {project.projectName}</option>)}
+          </select>
+          <label htmlFor="correction-item">Item</label>
+          <select id="correction-item" value={replacement.itemId} onChange={(event) => setReplacement((current) => ({ ...current, itemId: event.target.value }))}>
+            {items.map((item) => <option key={item.id} value={item.id}>{item.item}</option>)}
+          </select>
+          <label htmlFor="correction-amount">Amount</label>
+          <input id="correction-amount" type="number" step="any" value={replacement.amount} onChange={(event) => setReplacement((current) => ({ ...current, amount: event.target.value }))} required />
+          <label htmlFor="correction-unit">Unit</label>
+          <select id="correction-unit" value={safeUnit(replacement.unitOfMeasure)} onChange={(event) => setReplacement((current) => ({ ...current, unitOfMeasure: event.target.value }))} required>
+            {ALLOWED_UNITS.map((unit) => <option key={unit} value={unit}>{unit}</option>)}
+          </select>
+          <label htmlFor="correction-comments">Comments</label>
+          <textarea id="correction-comments" value={replacement.comments} onChange={(event) => setReplacement((current) => ({ ...current, comments: event.target.value }))} />
+          <button type="submit">Save correction</button>
+        </form>
+      ) : null}
+    </div>
+  );
+}
+
+function ImportAdmin({
+  actorId,
+  profiles,
+  projects,
+  onMessage,
+  onError,
+  onRefresh
+}: AdminChildProps & {
+  actorId: string;
+  profiles: Profile[];
+  projects: Project[];
+}): JSX.Element {
+  const [itemsImport, setItemsImport] = useState<ParsedItemsImport | null>(null);
+  const [projectUsersImport, setProjectUsersImport] = useState<ParsedProjectUsersImport | null>(null);
+
+  async function importItems() {
+    if (!itemsImport) return;
+    try {
+      const batch = writeBatch(itemsCollection.firestore);
+      itemsImport.rows.forEach((row) => {
+        if (!row.databaseCode || !row.item) return;
+        const itemId = itemIdFromDatabaseCode(row.databaseCode);
+        batch.set(
+          itemDoc(itemId),
+          {
+            databaseCode: row.databaseCode,
+            itemCode: row.itemCode,
+            itemType: row.itemType,
+            item: row.item,
+            unitOfMeasure: row.unitOfMeasure,
+            active: row.active,
+            createdAt: serverTimestamp(),
+            updatedAt: serverTimestamp(),
+            updatedBy: actorId
+          },
+          { merge: true }
+        );
+        batch.set(
+          itemCostDoc(itemId),
+          {
+            itemId,
+            databaseCode: row.databaseCode,
+            itemCode: row.itemCode,
+            itemType: row.itemType,
+            itemName: row.item,
+            cost: row.cost,
+            createdAt: serverTimestamp(),
+            updatedAt: serverTimestamp(),
+            updatedBy: actorId
+          },
+          { merge: true }
+        );
+      });
+      await batch.commit();
+      await addDoc(auditLogCollection, {
+        actorUserId: actorId,
+        action: "import_items",
+        entityType: "items",
+        entityId: "items_20260605",
+        beforeJson: null,
+        afterJson: {
+          rowCount: itemsImport.rows.length,
+          issueCount: itemsImport.issues.length,
+          costCount: itemsImport.rows.filter((row) => row.cost !== null).length
+        },
+        reason: "Admin-approved spreadsheet import",
+        createdAt: serverTimestamp()
+      });
+      onMessage("Items imported.");
+      await onRefresh();
+    } catch {
+      onError("Could not import items.");
+    }
+  }
+
+  async function importProjectUsers() {
+    if (!projectUsersImport) return;
+    try {
+      const batch = writeBatch(projectsCollection.firestore);
+      projectUsersImport.projects.forEach((projectCode) => {
+        const id = projectIdFromCode(projectCode);
+        batch.set(
+          projectDoc(id),
+          {
+            projectCode,
+            projectName: projects.find((project) => project.projectCode === projectCode)?.projectName || projectCode,
+            active: true,
+            createdAt: serverTimestamp(),
+            updatedAt: serverTimestamp(),
+            updatedBy: actorId
+          },
+          { merge: true }
+        );
+      });
+
+      const profilesByName = new Map(profiles.map((profile) => [profile.displayName.toLowerCase(), profile]));
+      let matchedMemberships = 0;
+      const unmatchedUsers = new Set<string>();
+      projectUsersImport.rows.forEach((row) => {
+        const profile = profilesByName.get(row.displayName.toLowerCase());
+        if (!profile) {
+          unmatchedUsers.add(row.displayName);
+          return;
+        }
+        const projectId = projectIdFromCode(row.projectCode);
+        batch.set(
+          membershipDoc(profile.id, projectId),
+          {
+            userId: profile.id,
+            projectId,
+            active: true,
+            createdAt: serverTimestamp(),
+            updatedAt: serverTimestamp(),
+            updatedBy: actorId
+          },
+          { merge: true }
+        );
+        matchedMemberships += 1;
+      });
+
+      await batch.commit();
+      await addDoc(auditLogCollection, {
+        actorUserId: actorId,
+        action: "import_project_users",
+        entityType: "projectMemberships",
+        entityId: "projects-users_20260603",
+        beforeJson: null,
+        afterJson: {
+          projectCount: projectUsersImport.projects.length,
+          matchedMemberships,
+          unmatchedUsers: [...unmatchedUsers]
+        },
+        reason: "Admin-approved spreadsheet import",
+        createdAt: serverTimestamp()
+      });
+      onMessage(`Projects imported. Matched ${matchedMemberships} memberships; ${unmatchedUsers.size} names need user accounts or exact display-name matching.`);
+      await onRefresh();
+    } catch {
+      onError("Could not import project/user data.");
+    }
+  }
+
+  return (
+    <div className="admin-grid">
+      <section className="panel form-stack">
+        <h2>Item spreadsheet</h2>
+        <input type="file" accept=".xlsx" onChange={(event) => {
+          const file = event.target.files?.[0];
+          if (file) void parseItemsFile(file).then(setItemsImport).catch(() => onError("Could not read item spreadsheet."));
+        }} />
+        {itemsImport ? (
+          <>
+            <ImportSummary issues={itemsImport.issues} rowCount={itemsImport.rows.length} />
+            <button type="button" onClick={() => void importItems()}>
+              <FileUp size={18} aria-hidden="true" />
+              Import items
+            </button>
+          </>
+        ) : null}
+      </section>
+
+      <section className="panel form-stack">
+        <h2>Project/user spreadsheet</h2>
+        <input type="file" accept=".xlsx" onChange={(event) => {
+          const file = event.target.files?.[0];
+          if (file) void parseProjectUsersFile(file).then(setProjectUsersImport).catch(() => onError("Could not read project/user spreadsheet."));
+        }} />
+        {projectUsersImport ? (
+          <>
+            <ImportSummary issues={projectUsersImport.issues} rowCount={projectUsersImport.rows.length} />
+            <p className="helper-text">{projectUsersImport.projects.length} projects, {projectUsersImport.users.length} user names.</p>
+            <button type="button" onClick={() => void importProjectUsers()}>
+              <FileUp size={18} aria-hidden="true" />
+              Import projects
+            </button>
+          </>
+        ) : null}
+      </section>
+    </div>
+  );
+}
+
+function ProjectCheckboxes({
+  projects,
+  selected,
+  onToggle
+}: {
+  projects: Project[];
+  selected: string[];
+  onToggle: (projectId: string) => void;
+}): JSX.Element {
+  return (
+    <fieldset className="checkbox-grid">
+      <legend>Projects</legend>
+      {projects.map((project) => (
+        <label key={project.id}>
+          <input
+            type="checkbox"
+            checked={selected.includes(project.id)}
+            onChange={() => onToggle(project.id)}
+          />
+          <span>{project.projectCode}</span>
+        </label>
+      ))}
+    </fieldset>
+  );
+}
+
+function EntityTable({
+  title,
+  rows
+}: {
+  title: string;
+  rows: Array<{
+    id: string;
+    primary: string;
+    secondary: string;
+    active: boolean;
+    onEdit?: () => void;
+    onToggle: () => void;
+    onDelete: () => void;
+  }>;
+}): JSX.Element {
+  return (
+    <section className={title ? "panel" : ""}>
+      {title ? <h2>{title}</h2> : null}
+      <div className="table-shell compact-table">
+        <table>
+          <thead>
+            <tr>
+              <th>Name</th>
+              <th>Active</th>
+              <th>Actions</th>
+            </tr>
+          </thead>
+          <tbody>
+            {rows.map((row) => (
+              <tr key={row.id}>
+                <td data-label="Name">
+                  <span>{row.primary}</span>
+                  <small>{row.secondary}</small>
+                </td>
+                <td data-label="Active">{row.active ? "yes" : "no"}</td>
+                <td data-label="Actions" className="action-cell">
+                  {row.onEdit ? (
+                    <button className="secondary" type="button" onClick={row.onEdit}>
+                      <Pencil size={16} aria-hidden="true" />
+                      Edit
+                    </button>
+                  ) : null}
+                  <button className="secondary" type="button" onClick={row.onToggle}>
+                    {row.active ? "Deactivate" : "Activate"}
+                  </button>
+                  <button className="danger" type="button" onClick={row.onDelete}>
+                    <Trash2 size={16} aria-hidden="true" />
+                    Delete
+                  </button>
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+    </section>
+  );
+}
+
+function ImportSummary({ issues, rowCount }: { issues: { severity: string; message: string; row?: number; field?: string }[]; rowCount: number }): JSX.Element {
+  const errors = issues.filter((issue) => issue.severity === "error").length;
+  const warnings = issues.length - errors;
+  return (
+    <div className="import-summary">
+      <p>{row
