@@ -24,20 +24,23 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Prepare frontend source
+      - name: Extract frontend source
         run: |
-          if [ -f package.json ]; then
-            echo "APP_DIR=." >> "$GITHUB_ENV"
-          else
-            mkdir app
-            tar -xzf frontend-source.tgz -C app
-            echo "APP_DIR=app" >> "$GITHUB_ENV"
-          fi
+          mkdir app
+          tar -xzf frontend-source.tgz -C app
+          echo "APP_DIR=app" >> "$GITHUB_ENV"
 
-      - name: Restore invoice template
+      - name: Apply source overlays
         run: |
-          if [ -f "$APP_DIR/public/invoice_template_20260605.xlsx.b64.001" ]; then
-            cat "$APP_DIR"/public/invoice_template_20260605.xlsx.b64.* | base64 -d > "$APP_DIR/public/invoice_template_20260605.xlsx"
+          if [ -d src ]; then
+            cp -R src/. app/src/
+          fi
+          if [ -d public ]; then
+            mkdir -p app/public
+            cp -R public/. app/public/
+          fi
+          if [ -f app/public/invoice_template_20260605.xlsx.b64.001 ]; then
+            cat app/public/invoice_template_20260605.xlsx.b64.* | base64 -d > app/public/invoice_template_20260605.xlsx
           fi
 
       - name: Setup Node
@@ -45,14 +48,14 @@ jobs:
         with:
           node-version: '20'
           cache: npm
-          cache-dependency-path: ${{ env.APP_DIR }}/package.json
+          cache-dependency-path: app/package.json
 
       - name: Install dependencies
-        working-directory: ${{ env.APP_DIR }}
+        working-directory: app
         run: npm install
 
       - name: Build
-        working-directory: ${{ env.APP_DIR }}
+        working-directory: app
         env:
           VITE_FIREBASE_API_KEY: AIzaSyBDz6mvfJYlZ-zww-V4yW5uHD_O63rbdGk
           VITE_FIREBASE_AUTH_DOMAIN: viv-consumables.firebaseapp.com
@@ -70,7 +73,7 @@ jobs:
       - name: Upload artifact
         uses: actions/upload-pages-artifact@v3
         with:
-          path: ${{ env.APP_DIR }}/dist
+          path: app/dist
 
       - name: Deploy to GitHub Pages
         id: deployment
