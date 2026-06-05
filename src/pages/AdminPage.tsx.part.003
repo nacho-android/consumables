@@ -1,0 +1,339 @@
+id), {
+        active: !item.active,
+        updatedAt: serverTimestamp(),
+        updatedBy: actorId
+      });
+      onMessage(item.active ? "Item deactivated." : "Item activated.");
+      await onRefresh();
+    } catch {
+      onError("Could not update item.");
+    }
+  }
+
+  async function removeItem(item: Item) {
+    if (!window.confirm(`Delete ${item.item} if safe, otherwise deactivate?`)) return;
+    try {
+      const result = await deleteOrDeactivateItem({ itemId: item.id });
+      onMessage(`Item ${(result.data as { action: string }).action}.`);
+      await onRefresh();
+    } catch {
+      onError("Could not delete or deactivate item.");
+    }
+  }
+
+  function editItem(item: Item) {
+    setEditingItemId(item.id);
+    setForm({
+      databaseCode: item.databaseCode,
+      itemCode: item.itemCode,
+      itemType: item.itemType,
+      item: item.item,
+      unitOfMeasure: safeUnit(item.unitOfMeasure),
+      cost: costByItemId.get(item.id)?.cost?.toString() ?? ""
+    });
+    onError(null);
+    onMessage(null);
+  }
+
+  function cancelEdit() {
+    setEditingItemId(null);
+    setForm({ databaseCode: "", itemCode: "", itemType: "", item: "", unitOfMeasure: FALLBACK_UNIT, cost: "" });
+  }
+
+  return (
+    <div className="admin-grid">
+      <form className="panel form-stack" onSubmit={(event) => void saveItem(event)}>
+        <h2>{editingItemId ? "Edit item" : "Add item"}</h2>
+        {(["databaseCode", "itemCode", "itemType", "item"] as const).map((field) => (
+          <div className="form-stack compact" key={field}>
+            <label htmlFor={field}>{field}</label>
+            <input
+              id={field}
+              value={form[field]}
+              required={field === "databaseCode" || field === "item"}
+              onChange={(event) => setForm((current) => ({ ...current, [field]: event.target.value }))}
+            />
+          </div>
+        ))}
+        <label htmlFor="unitOfMeasure">unitOfMeasure</label>
+        <select
+          id="unitOfMeasure"
+          value={form.unitOfMeasure}
+          onChange={(event) => setForm((current) => ({ ...current, unitOfMeasure: safeUnit(event.target.value) }))}
+        >
+          {ALLOWED_UNITS.map((unit) => (
+            <option key={unit} value={unit}>{unit}</option>
+          ))}
+        </select>
+        <label htmlFor="item-cost">cost</label>
+        <input
+          id="item-cost"
+          type="number"
+          inputMode="decimal"
+          step="0.01"
+          min="0"
+          value={form.cost}
+          onChange={(event) => setForm((current) => ({ ...current, cost: event.target.value }))}
+        />
+        <button type="submit">
+          <Plus size={18} aria-hidden="true" />
+          Save item
+        </button>
+        {editingItemId ? (
+          <button className="secondary" type="button" onClick={cancelEdit}>
+            Cancel
+          </button>
+        ) : null}
+      </form>
+      <section className="panel">
+        <h2>Items</h2>
+        <div className="field-row">
+          <Search size={18} aria-hidden="true" />
+          <input aria-label="Search items" value={search} onChange={(event) => setSearch(event.target.value)} />
+        </div>
+        <EntityTable
+          title=""
+          rows={filtered.map((item) => ({
+            id: item.id,
+            primary: item.item,
+            secondary: [
+              item.itemType,
+              item.databaseCode,
+              item.itemCode,
+              item.unitOfMeasure || "missing unit",
+              `cost ${formatCost(costByItemId.get(item.id)?.cost)}`
+            ].join(" | "),
+            active: item.active,
+            onEdit: () => editItem(item),
+            onToggle: () => void toggleItem(item),
+            onDelete: () => void removeItem(item)
+          }))}
+        />
+      </section>
+    </div>
+  );
+}
+
+function formatCost(cost: number | null | undefined): string {
+  return typeof cost === "number" && Number.isFinite(cost) ? cost.toFixed(2) : "missing";
+}
+
+function DataAdmin({
+  currentUser,
+  transactions,
+  projects,
+  items,
+  onLoad,
+  onMessage,
+  onError
+}: {
+  currentUser: User;
+  transactions: AcquisitionTransaction[];
+  projects: Project[];
+  items: Item[];
+  onLoad: () => Promise<void>;
+  onMessage: (message: string | null) => void;
+  onError: (message: string | null) => void;
+}): JSX.Element {
+  const [selected, setSelected] = useState<AcquisitionTransaction | null>(null);
+  const [reason, setReason] = useState("");
+  const [replacement, setReplacement] = useState({
+    transactionDate: "",
+    projectId: "",
+    itemId: "",
+    amount: "",
+    unitOfMeasure: "",
+    comments: ""
+  });
+  const [purgeScope, setPurgeScope] = useState<"range" | "all">("range");
+  const [purgeProjectId, setPurgeProjectId] = useState("all");
+  const [purgeStartDate, setPurgeStartDate] = useState("");
+  const [purgeEndDate, setPurgeEndDate] = useState("");
+  const [purgeConfirm, setPurgeConfirm] = useState("");
+  const [purgePassword, setPurgePassword] = useState("");
+  const [purgeBusy, setPurgeBusy] = useState(false);
+
+  async function voidSelected(tx: AcquisitionTransaction) {
+    const why = window.prompt("Reason for voiding this transaction");
+    if (!why) return;
+    try {
+      await voidTransaction({ transactionId: tx.id, reason: why });
+      onMessage("Transaction voided.");
+      await onLoad();
+    } catch {
+      onError("Could not void transaction.");
+    }
+  }
+
+  function startCorrection(tx: AcquisitionTransaction) {
+    setSelected(tx);
+    setReason("");
+    setReplacement({
+      transactionDate: tx.transactionDate,
+      projectId: tx.projectId,
+      itemId: tx.itemId,
+      amount: String(tx.amount),
+      unitOfMeasure: safeUnit(tx.unitOfMeasure),
+      comments: tx.comments || ""
+    });
+  }
+
+  async function submitCorrection(event: React.FormEvent) {
+    event.preventDefault();
+    if (!selected) return;
+    const project = projects.find((entry) => entry.id === replacement.projectId);
+    const item = items.find((entry) => entry.id === replacement.itemId);
+    if (!project || !item || !reason.trim()) {
+      onError("Correction requires a reason, project, and item.");
+      return;
+    }
+    try {
+      await correctTransaction({
+        transactionId: selected.id,
+        reason,
+        replacement: {
+          transactionDate: replacement.transactionDate,
+          projectId: project.id,
+          itemId: item.id,
+          amount: Number(replacement.amount),
+          unitOfMeasure: replacement.unitOfMeasure,
+          comments: replacement.comments,
+          projectCode: project.projectCode,
+          projectName: project.projectName,
+          databaseCode: item.databaseCode,
+          itemCode: item.itemCode,
+          itemType: item.itemType,
+          itemName: item.item
+        }
+      });
+      setSelected(null);
+      onMessage("Correction saved.");
+      await onLoad();
+    } catch {
+      onError("Could not correct transaction.");
+    }
+  }
+
+  async function submitPurge(event: React.FormEvent) {
+    event.preventDefault();
+    onError(null);
+    onMessage(null);
+    if (!currentUser.email) {
+      onError("Your account needs an email address before purging transactions.");
+      return;
+    }
+    if (purgeConfirm !== "DELETE") {
+      onError("Type DELETE to confirm transaction purge.");
+      return;
+    }
+    if (purgeScope === "range" && (!purgeStartDate || !purgeEndDate || purgeStartDate > purgeEndDate)) {
+      onError("Choose a valid date range, or switch to all dates.");
+      return;
+    }
+
+    setPurgeBusy(true);
+    try {
+      const credential = EmailAuthProvider.credential(currentUser.email, purgePassword);
+      await reauthenticateWithCredential(currentUser, credential);
+      await currentUser.getIdToken(true);
+      const result = await purgeTransactions({
+        projectId: purgeProjectId === "all" ? "" : purgeProjectId,
+        startDate: purgeScope === "range" ? purgeStartDate : "",
+        endDate: purgeScope === "range" ? purgeEndDate : "",
+        confirm: purgeConfirm
+      });
+      const deletedCount = Number((result.data as { deletedCount?: unknown }).deletedCount ?? 0);
+      setPurgeConfirm("");
+      setPurgePassword("");
+      onMessage(`Deleted ${deletedCount} transaction${deletedCount === 1 ? "" : "s"}.`);
+      await onLoad();
+    } catch {
+      onError("Could not purge transactions. Check your password, filters, and admin access.");
+      setPurgePassword("");
+    } finally {
+      setPurgeBusy(false);
+    }
+  }
+
+  return (
+    <div className="admin-grid">
+      <section className="panel">
+        <div className="form-header">
+          <h2>Transactions</h2>
+          <button className="secondary" type="button" onClick={() => void onLoad()}>
+            <RefreshCw size={18} aria-hidden="true" />
+            Load
+          </button>
+        </div>
+        <div className="table-shell compact-table">
+          <table>
+            <thead>
+              <tr>
+                <th>Date</th>
+                <th>Project</th>
+                <th>Item</th>
+                <th>Status</th>
+                <th>Actions</th>
+              </tr>
+            </thead>
+            <tbody>
+              {transactions.map((tx) => (
+                <tr key={tx.id}>
+                  <td data-label="Date">
+                    <span>{formatDate(tx.transactionDate)}</span>
+                    <small>{formatDateTime(tx.submittedAt)}</small>
+                  </td>
+                  <td data-label="Project">{tx.projectCode}</td>
+                  <td data-label="Item">{tx.itemName}</td>
+                  <td data-label="Status"><span className={`status ${tx.status}`}>{tx.status}</span></td>
+                  <td data-label="Actions" className="action-cell">
+                    <button className="secondary" type="button" disabled={tx.status !== "active"} onClick={() => void voidSelected(tx)}>
+                      Void
+                    </button>
+                    <button className="secondary" type="button" disabled={tx.status !== "active"} onClick={() => startCorrection(tx)}>
+                      Correct
+                    </button>
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      </section>
+
+      <form className="panel form-stack" autoComplete="off" onSubmit={(event) => void submitPurge(event)}>
+        <div className="form-header">
+          <h2>Purge transactions</h2>
+          <Trash2 size={20} aria-hidden="true" />
+        </div>
+        <Message kind="error">
+          This permanently deletes matching transaction records. Export data first if you need a copy.
+        </Message>
+
+        <label htmlFor="purge-project">Project</label>
+        <select id="purge-project" value={purgeProjectId} onChange={(event) => setPurgeProjectId(event.target.value)}>
+          <option value="all">All projects</option>
+          {projects.map((project) => (
+            <option key={project.id} value={project.id}>
+              {project.projectCode} {project.projectName}
+            </option>
+          ))}
+        </select>
+
+        <label htmlFor="purge-scope">Dates</label>
+        <select id="purge-scope" value={purgeScope} onChange={(event) => setPurgeScope(event.target.value as "range" | "all")}>
+          <option value="range">Selected date range</option>
+          <option value="all">All dates</option>
+        </select>
+
+        {purgeScope === "range" ? (
+          <div className="two-column">
+            <div className="form-stack compact">
+              <label htmlFor="purge-start">Start date</label>
+              <input id="purge-start" type="date" value={purgeStartDate} onChange={(event) => setPurgeStartDate(event.target.value)} required />
+            </div>
+            <div className="form-stack compact">
+              <label htmlFor="purge-end">End date</label>
+              <input id="purge-end" type="date" value={purgeEndDate} onChange={(event) => setPurgeEndDate(event.target.value)} required />
+            </div>
+    
