@@ -1,0 +1,251 @@
+rules_version = '2';
+
+service cloud.firestore {
+  match /databases/{database}/documents {
+    function signedIn() {
+      return request.auth != null;
+    }
+
+    function profilePath(uid) {
+      return /databases/$(database)/documents/profiles/$(uid);
+    }
+
+    function projectPath(projectId) {
+      return /databases/$(database)/documents/projects/$(projectId);
+    }
+
+    function itemPath(itemId) {
+      return /databases/$(database)/documents/items/$(itemId);
+    }
+
+    function membershipPath(uid, projectId) {
+      let membershipId = uid + "_" + projectId;
+      return /databases/$(database)/documents/projectMemberships/$(membershipId);
+    }
+
+    function isActiveUser() {
+      return signedIn()
+        && exists(profilePath(request.auth.uid))
+        && get(profilePath(request.auth.uid)).data.active == true;
+    }
+
+    function isAdmin() {
+      return isActiveUser()
+        && get(profilePath(request.auth.uid)).data.role == "admin";
+    }
+
+    function hasActiveMembership(uid, projectId) {
+      return exists(membershipPath(uid, projectId))
+        && get(membershipPath(uid, projectId)).data.userId == uid
+        && get(membershipPath(uid, projectId)).data.projectId == projectId
+        && get(membershipPath(uid, projectId)).data.active == true;
+    }
+
+    function isActiveProject(projectId) {
+      return exists(projectPath(projectId))
+        && get(projectPath(projectId)).data.active == true;
+    }
+
+    function isActiveItem(itemId) {
+      return exists(itemPath(itemId))
+        && get(itemPath(itemId)).data.active == true;
+    }
+
+    function hasOnlyAllowedTransactionFields() {
+      return request.resource.data.keys().hasOnly([
+        "transactionDate",
+        "submittedAt",
+        "userId",
+        "projectId",
+        "itemId",
+        "amount",
+        "unitOfMeasure",
+        "comments",
+        "status",
+        "originalTransactionId",
+        "voidOrCorrectionReason",
+        "createdAt",
+        "updatedAt",
+        "updatedBy",
+        "userDisplayName",
+        "userEmail",
+        "projectCode",
+        "projectName",
+        "databaseCode",
+        "itemCode",
+        "itemType",
+        "itemName"
+      ]);
+    }
+
+    function validNewTransaction() {
+      return hasOnlyAllowedTransactionFields()
+        && request.resource.data.keys().hasAll([
+          "transactionDate",
+          "submittedAt",
+          "userId",
+          "projectId",
+          "itemId",
+          "amount",
+          "unitOfMeasure",
+          "status",
+          "createdAt",
+          "updatedAt",
+          "updatedBy",
+          "userDisplayName",
+          "userEmail",
+          "projectCode",
+          "projectName",
+          "databaseCode",
+          "itemType",
+          "itemName"
+        ])
+        && request.resource.data.transactionDate is string
+        && request.resource.data.transactionDate.matches("^\\d{4}-\\d{2}-\\d{2}$")
+        && request.resource.data.submittedAt == request.time
+        && request.resource.data.createdAt == request.time
+        && request.resource.data.updatedAt == request.time
+        && request.resource.data.updatedBy == request.auth.uid
+        && request.resource.data.userId == request.auth.uid
+        && request.resource.data.projectId is string
+        && request.resource.data.itemId is string
+        && request.resource.data.amount is number
+        && request.resource.data.amount > 0
+        && request.resource.data.unitOfMeasure is string
+        && request.resource.data.unitOfMeasure in ["each", "box", "daily"]
+        && request.resource.data.status == "active"
+        && (!request.resource.data.keys().hasAny(["originalTransactionId"])
+          || request.resource.data.originalTransactionId == null)
+        && (!request.resource.data.keys().hasAny(["voidOrCorrectionReason"])
+          || request.resource.data.voidOrCorrectionReason == null)
+        && hasActiveMembership(request.auth.uid, request.resource.data.projectId)
+        && isActiveProject(request.resource.data.projectId)
+        && isActiveItem(request.resource.data.itemId);
+    }
+
+    match /profiles/{uid} {
+      allow get: if isAdmin() || (isActiveUser() && request.auth.uid == uid);
+      allow list: if isAdmin();
+      allow create: if isAdmin()
+        && request.resource.data.keys().hasAll(["email", "displayName", "role", "active", "createdAt", "updatedAt", "updatedBy"])
+        && request.resource.data.keys().hasOnly(["email", "displayName", "role", "active", "createdAt", "updatedAt", "updatedBy"])
+        && request.resource.data.role in ["admin", "standard"]
+        && request.resource.data.active is bool
+        && request.resource.data.updatedBy == request.auth.uid;
+      allow update: if isAdmin()
+        && request.resource.data.role in ["admin", "standard"]
+        && request.resource.data.active is bool
+        && request.resource.data.updatedBy == request.auth.uid;
+      allow update: if isActiveUser()
+        && request.auth.uid == uid
+        && request.resource.data.diff(resource.data).affectedKeys().hasOnly(["displayName", "updatedAt", "updatedBy"])
+        && request.resource.data.updatedBy == request.auth.uid;
+      allow delete: if false;
+    }
+
+    match /projects/{projectId} {
+      allow get, list: if isAdmin() || (isActiveUser() && hasActiveMembership(request.auth.uid, projectId));
+      allow create, update: if isAdmin()
+        && request.resource.data.keys().hasAll(["projectCode", "projectName", "active", "createdAt", "updatedAt", "updatedBy"])
+        && request.resource.data.keys().hasOnly(["projectCode", "projectName", "active", "createdAt", "updatedAt", "updatedBy"])
+        && request.resource.data.projectCode is string
+        && request.resource.data.projectName is string
+        && request.resource.data.active is bool
+        && request.resource.data.updatedBy == request.auth.uid;
+      allow delete: if false;
+    }
+
+    match /projectMemberships/{membershipId} {
+      allow get, list: if isAdmin()
+        || (isActiveUser()
+          && resource.data.userId == request.auth.uid
+          && resource.data.active == true);
+      allow create, update: if isAdmin()
+        && request.resource.data.keys().hasAll(["userId", "projectId", "active", "createdAt", "updatedAt", "updatedBy"])
+        && request.resource.data.keys().hasOnly(["userId", "projectId", "active", "createdAt", "updatedAt", "updatedBy"])
+        && membershipId == request.resource.data.userId + "_" + request.resource.data.projectId
+        && request.resource.data.userId is string
+        && request.resource.data.projectId is string
+        && request.resource.data.active is bool
+        && request.resource.data.updatedBy == request.auth.uid;
+      allow delete: if false;
+    }
+
+    match /items/{itemId} {
+      allow get, list: if isAdmin()
+        || (isActiveUser() && resource.data.active == true);
+      allow create, update: if isAdmin()
+        && request.resource.data.keys().hasAll(["databaseCode", "itemCode", "itemType", "item", "unitOfMeasure", "active", "createdAt", "updatedAt", "updatedBy"])
+        && request.resource.data.keys().hasOnly(["databaseCode", "itemCode", "itemType", "item", "unitOfMeasure", "active", "createdAt", "updatedAt", "updatedBy"])
+        && request.resource.data.databaseCode is string
+        && request.resource.data.itemCode is string
+        && request.resource.data.itemType is string
+        && request.resource.data.item is string
+        && request.resource.data.unitOfMeasure is string
+        && request.resource.data.unitOfMeasure in ["", "each", "box", "daily"]
+        && request.resource.data.active is bool
+        && request.resource.data.updatedBy == request.auth.uid;
+      allow delete: if isAdmin();
+    }
+
+    match /itemCosts/{itemId} {
+      allow get, list: if isAdmin();
+      allow create, update: if isAdmin()
+        && request.resource.data.keys().hasAll(["itemId", "databaseCode", "itemCode", "itemType", "itemName", "costEach", "costBox", "createdAt", "updatedAt", "updatedBy"])
+        && request.resource.data.keys().hasOnly(["itemId", "databaseCode", "itemCode", "itemType", "itemName", "costEach", "costBox", "createdAt", "updatedAt", "updatedBy"])
+        && request.resource.data.itemId == itemId
+        && request.resource.data.databaseCode is string
+        && request.resource.data.itemCode is string
+        && request.resource.data.itemType is string
+        && request.resource.data.itemName is string
+        && (request.resource.data.costEach == null || (request.resource.data.costEach is number && request.resource.data.costEach >= 0))
+        && (request.resource.data.costBox == null || (request.resource.data.costBox is number && request.resource.data.costBox >= 0))
+        && request.resource.data.updatedBy == request.auth.uid;
+      allow delete: if isAdmin();
+    }
+
+    match /inventory/{itemId} {
+      allow get, list: if isAdmin();
+      allow create, update, delete: if false;
+    }
+
+    match /inventoryAdjustmentEvents/{eventId} {
+      allow read, write: if false;
+    }
+
+    match /mail/{messageId} {
+      allow read, write: if false;
+    }
+
+    match /billingAddresses/{addressId} {
+      allow get, list: if isAdmin();
+      allow create, update: if isAdmin()
+        && request.resource.data.keys().hasAll(["displayName", "address", "projectCodes", "createdAt", "updatedAt", "updatedBy"])
+        && request.resource.data.keys().hasOnly(["displayName", "address", "projectCodes", "createdAt", "updatedAt", "updatedBy"])
+        && request.resource.data.displayName is string
+        && request.resource.data.address is string
+        && request.resource.data.projectCodes is string
+        && request.resource.data.updatedBy == request.auth.uid;
+      allow delete: if isAdmin();
+    }
+
+    match /transactions/{transactionId} {
+      allow get, list: if isAdmin()
+        || (isActiveUser() && hasActiveMembership(request.auth.uid, resource.data.projectId));
+      allow create: if isActiveUser() && validNewTransaction();
+      allow update, delete: if false;
+    }
+
+    match /auditLog/{entryId} {
+      allow get, list: if isAdmin();
+      allow create: if isAdmin()
+        && request.resource.data.actorUserId == request.auth.uid
+        && request.resource.data.createdAt == request.time;
+      allow update, delete: if false;
+    }
+
+    match /importRuns/{runId} {
+      allow read, write: if isAdmin();
+    }
+  }
+}
