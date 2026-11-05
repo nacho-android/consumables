@@ -143,6 +143,20 @@ service cloud.firestore {
       allow delete: if false;
     }
 
+    match /userPreferences/{uid} {
+      allow get: if isActiveUser() && request.auth.uid == uid;
+      allow create, update: if isActiveUser() && request.auth.uid == uid
+        && request.resource.data.keys().hasOnly(["entryProjectId", "invoiceEmail", "invoiceXlsx", "invoicePdf", "updatedAt"])
+        && (!request.resource.data.keys().hasAny(["entryProjectId"]) ||
+          (request.resource.data.entryProjectId is string && request.resource.data.entryProjectId.size() <= 1500))
+        && (!request.resource.data.keys().hasAny(["invoiceEmail"]) ||
+          (request.resource.data.invoiceEmail is string && request.resource.data.invoiceEmail.size() <= 254))
+        && (!request.resource.data.keys().hasAny(["invoiceXlsx"]) || request.resource.data.invoiceXlsx is bool)
+        && (!request.resource.data.keys().hasAny(["invoicePdf"]) || request.resource.data.invoicePdf is bool)
+        && request.resource.data.updatedAt == request.time;
+      allow list, delete: if false;
+    }
+
     match /projects/{projectId} {
       allow get, list: if isAdmin() || (isActiveUser() && hasActiveMembership(request.auth.uid, projectId));
       allow create, update: if isAdmin()
